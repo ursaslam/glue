@@ -5,7 +5,7 @@ aws glue start-job-run \
   --arguments '{"--SYS_LEVEL":"dev","--DATASET":"VGI_FIN_GL_ACCOUNT_D","--FULL_LOAD":"false"}'
 
 
-Verifying Iceberg Table Creation
+Verifying Iceberg Table Creation:
 
 After job runs, verify:
 Check Glue Catalog
