@@ -141,4 +141,38 @@ def main():
     write_curated(
         df=df_valid,
         curated_path=curated_path,
-        full_load=_
+        full_load=full_load,
+        iceberg_conf=iceberg_conf,
+        spark=spark
+    )
+
+    # Write rejects (always Parquet)
+    if df_reject is not None:
+        reject_path = curated_path.rstrip("/") + "_rejects/"
+        df_reject.write.mode("overwrite").parquet(reject_path)
+        log("info", "rejects", "Reject records written",
+            path=reject_path,
+            rows=rejected_count)
+
+    # ---------------------------------------------------------
+    # 10) Audit record
+    # ---------------------------------------------------------
+    write_audit(
+        spark=spark,
+        audit_path=audit_path,
+        dataset_nm=dataset,
+        sys_level=sys_level,
+        src_count=src_count,
+        curated_count=curated_count,
+        rejected_count=rejected_count,
+        status="SUCCESS"
+    )
+
+    log("info", "complete", "ETL Pipeline Completed Successfully",
+        source_rows=src_count,
+        curated_rows=curated_count,
+        rejected_rows=rejected_count)
+
+
+if __name__ == "__main__":
+    main()
