@@ -1,0 +1,1 @@
+print('main_glue_job placeholder')

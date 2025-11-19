@@ -1,0 +1,1 @@
+print('metadata loader placeholder')
