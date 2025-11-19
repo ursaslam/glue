@@ -2,38 +2,35 @@
   "ds": {
     "nm": "VGI_FIN_GL_ACCOUNT_D",
     "ver": "1.0",
-    "desc": "Metadata contract for VGI_FIN_GL_ACCOUNT_D",
-    "src_sys": "source_system",
-    "tgt_sys": "glue_catalog",
+    "desc": "Metadata for VGI_FIN_GL_ACCOUNT_D",
     "format": "parquet",
     "src_prefix": "s3://bucket/prefix",
-    "id_cols": [
-      "ROW_KEY"
-    ],
-    "upd_cols": [
-      "LAST_UPD_TS"
-    ],
+    "id_cols": ["ROW_KEY"],
+    "upd_cols": ["LAST_UPD_TS"],
+
     "dq_rules": {
       "check_schema": true,
       "check_row_count": true,
       "allow_extra_columns": true,
       "allow_missing_columns": false
     },
+
+    "iceberg": {
+      "enabled": true,
+      "catalog": "glue_catalog",
+      "database": "adw_erp_spen",
+      "table": "vgi_fin_gl_account_d",
+      "partition_cols": ["load_dt"]
+    },
+
     "cols": [
       {
         "src_nm": "ROW_KEY",
         "tgt_nm": "ROW_KEY",
         "src_dtype": "decimal(38,20)",
         "tgt_dtype": "decimal(38,20)",
-        "precision": 38,
-        "scale": 20,
-        "src_fmt": "",
-        "tgt_fmt": "",
         "nullable": true,
-        "regex": "",
-        "len": "",
-        "chg_types": [],
-        "comment": "Business definition for ROW_KEY"
+        "regex": ""
       }
     ]
   }
