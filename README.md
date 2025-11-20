@@ -1,3 +1,29 @@
+zip:
+    name: Zip Glue Job Including Custom Folder
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Create Glue Job ZIP (include EVERYTHING)
+        run: |
+          echo "Zipping entire src/app folder..."
+          cd src/app
+          zip -r ../../glue_job_package.zip .
+          cd ../..
+          echo "ZIP Contents:"
+          unzip -l glue_job_package.zip
+
+      - name: Upload ZIP for next stage
+        uses: actions/upload-artifact@v4
+        with:
+          name: glue-zip
+          path: glue_job_package.zip
+
+          
+
+
 
 Run from CLI
 aws glue start-job-run \
