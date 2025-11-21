@@ -34,10 +34,9 @@ def main():
     # ---------------------------------------------------------
     base = f"s3://bi-efs-{sys_level}-us-east-1-dna-raw-sf-ans"
 
-    staging_path = f"{base}/adw/ERP/Spen/data/staging/{dataset}"
-    audit_path   = f"{base}/adw/ERP/Spen/data/audit/"
-    curated_path = f"{base}/curated/adw/ERP/Spen/{dataset}/"
-
+    staging_path = f"{base}/"
+    audit_path   = f"{base}/"
+    curated_path = f"{base}
     log("info", "paths", "Resolved S3 paths",
         sys_level=sys_level,
         dataset=dataset,
