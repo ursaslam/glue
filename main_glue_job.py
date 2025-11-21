@@ -1,177 +1,21 @@
-import sys
-from awsglue.context import GlueContext
-from awsglue.utils import getResolvedOptions
-from pyspark.context import SparkContext
+def dedupe(df, id_cols, upd_cols):
+    # Clean out empty strings
+    clean_id_cols = [c for c in id_cols if c and c.strip()]
+    clean_upd_cols = [c for c in upd_cols if c and c.strip()]
 
-from utilities.logger import log
-from utilities.metadata_loader import load_metadata
-from utilities.schema_validator import validate_schema
-from utilities.id_dedupe import dedupe
-from utilities.rowcount_validator import validate_rowcount
+    # No dedupe needed
+    if not clean_id_cols or not clean_upd_cols:
+        log("warn", "dedupe", "Skipping dedupe due to missing id/upd cols")
+        return df
 
-from transformations.column_transformations import apply_column_transformations
-from transformations.dq_checks import apply_dq_rules
+    log("info", "dedupe", f"Running dedupe using id_cols={clean_id_cols}, upd_cols={clean_upd_cols}")
 
-from layers.staging_layer import write_staging
-from layers.curated_merge import write_curated
-from layers.audit_writer import write_audit
-from layers.iceberg_manager import create_iceberg_table
-
-
-def main():
-    # ---------------------------------------------------------
-    # Glue Arguments
-    # ---------------------------------------------------------
-    args = getResolvedOptions(sys.argv,
-                              ["SYS_LEVEL", "DATASET", "FULL_LOAD"])
-
-    sys_level = args["SYS_LEVEL"]
-    dataset = args["DATASET"]
-    full_load = args["FULL_LOAD"].lower() == "true"
-
-    # ---------------------------------------------------------
-    # Build bucket paths using your naming pattern
-    # ---------------------------------------------------------
-    base = f"s3://bi-efs-{sys_level}-us-east-1-dna-raw-sf-ans"
-
-    staging_path = f"{base}/"
-    audit_path   = f"{base}/"
-    curated_path = f"{base}
-    log("info", "paths", "Resolved S3 paths",
-        sys_level=sys_level,
-        dataset=dataset,
-        staging_path=staging_path,
-        audit_path=audit_path,
-        curated_path=curated_path)
-
-    # ---------------------------------------------------------
-    # Spark Init
-    # ---------------------------------------------------------
-    sc = SparkContext()
-    glue_ctx = GlueContext(sc)
-    spark = glue_ctx.spark_session
-
-    log("info", "init", "Glue job initialized")
-
-    # ---------------------------------------------------------
-    # Load metadata JSON from local config
-    # ---------------------------------------------------------
-    ds = load_metadata("config/sample_metadata.json")
-
-    src_prefix = ds["src_prefix"]
-    fmt = ds["format"]
-    cols = ds["cols"]
-    id_cols = ds.get("id_cols", [])
-    upd_cols = ds.get("upd_cols", [])
-    dq_rules = ds.get("dq_rules", {})
-    iceberg_conf = ds.get("iceberg", {})
-
-    log("info", "metadata", "Metadata loaded",
-        dataset_name=ds.get("nm"),
-        src_prefix=src_prefix,
-        format=fmt,
-        id_cols=id_cols,
-        upd_cols=upd_cols,
-        dq_rules=dq_rules,
-        iceberg_enabled=iceberg_conf.get("enabled", False))
-
-    # ---------------------------------------------------------
-    # 1) Read input (from src_prefix in metadata)
-    # ---------------------------------------------------------
-    df_src = spark.read.format(fmt).load(src_prefix)
-    src_count = df_src.count()
-
-    log("info", "read_input", "Source read complete",
-        rows=src_count,
-        src_prefix=src_prefix)
-
-    # ---------------------------------------------------------
-    # 2) Write to STAGING
-    # ---------------------------------------------------------
-    write_staging(df_src, staging_path, full_load)
-
-    # We continue with df_src for transformations
-    df_work = df_src
-
-    # ---------------------------------------------------------
-    # 3) Schema Validation
-    # ---------------------------------------------------------
-    validate_schema(df_work, cols, dq_rules)
-
-    # ---------------------------------------------------------
-    # 4) Column Transformations (rename + type enforcement)
-    # ---------------------------------------------------------
-    df_tx = apply_column_transformations(df_work, cols)
-
-    # ---------------------------------------------------------
-    # 5) DEDUPE (id columns + update timestamp columns)
-    # ---------------------------------------------------------
-    df_dedup = dedupe(df_tx, id_cols, upd_cols)
-
-    # ---------------------------------------------------------
-    # 6) DQ Checks → valid + reject sets
-    # ---------------------------------------------------------
-    df_valid, df_reject = apply_dq_rules(df_dedup, cols)
-
-    curated_count = df_valid.count()
-    rejected_count = df_reject.count() if df_reject is not None else 0
-
-    # ---------------------------------------------------------
-    # 7) Row Count Validation
-    # ---------------------------------------------------------
-    validate_rowcount(src_count, curated_count, dq_rules)
-
-    # ---------------------------------------------------------
-    # 8) If Iceberg is enabled, create table before merge
-    # ---------------------------------------------------------
-    if iceberg_conf.get("enabled", False):
-        create_iceberg_table(
-            spark=spark,
-            catalog=iceberg_conf["catalog"],
-            database=iceberg_conf["database"],
-            table=iceberg_conf["table"],
-            df=df_valid,
-            partition_cols=iceberg_conf.get("partition_cols", [])
+    w = Window.partitionBy(*clean_id_cols).orderBy(
+            *[F.col(c).desc() for c in clean_upd_cols]
         )
 
-    # ---------------------------------------------------------
-    # 9) Write curated layer (Iceberg or Parquet)
-    # ---------------------------------------------------------
-    write_curated(
-        df=df_valid,
-        curated_path=curated_path,
-        full_load=full_load,
-        iceberg_conf=iceberg_conf,
-        spark=spark
+    return (
+        df.withColumn("rn", F.row_number().over(w))
+          .filter("rn = 1")
+          .drop("rn")
     )
-
-    # Write rejects (always Parquet)
-    if df_reject is not None:
-        reject_path = curated_path.rstrip("/") + "_rejects/"
-        df_reject.write.mode("overwrite").parquet(reject_path)
-        log("info", "rejects", "Reject records written",
-            path=reject_path,
-            rows=rejected_count)
-
-    # ---------------------------------------------------------
-    # 10) Audit record
-    # ---------------------------------------------------------
-    write_audit(
-        spark=spark,
-        audit_path=audit_path,
-        dataset_nm=dataset,
-        sys_level=sys_level,
-        src_count=src_count,
-        curated_count=curated_count,
-        rejected_count=rejected_count,
-        status="SUCCESS"
-    )
-
-    log("info", "complete", "ETL Pipeline Completed Successfully",
-        source_rows=src_count,
-        curated_rows=curated_count,
-        rejected_rows=rejected_count)
-
-
-if __name__ == "__main__":
-    main()
