@@ -1,76 +1,46 @@
 
-name: Glue ETL Job CI
+import json
+import boto3
+from urllib.parse import urlparse
+from utilities.logger import log
 
-on:
-  workflow_dispatch:
-  push:
-    branches: ["**"]
-    tags-ignore: ["**"]
+def load_metadata(path):
+    """
+    Loads metadata either from local file or S3.
+    Example accepted paths:
+      - "custom/config/N.json"
+      - "s3://bucket/config/N.json"
+    """
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+    # Case 1: S3 path
+    if path.startswith("s3://"):
+        try:
+            log("info", "metadata", f"Loading metadata from S3 → {path}")
 
-jobs:
+            parsed = urlparse(path)
+            bucket = parsed.netloc
+            key = parsed.path.lstrip("/")
 
-  install:
-    name: Install Dependencies
-    uses: as/python.workflow/.github/workflows/pip-install.yml@v2
-    with:
-      pythonVersion: 3.11
+            s3 = boto3.client("s3")
+            obj = s3.get_object(Bucket=bucket, Key=key)
+            meta = json.loads(obj['Body'].read())
 
-  test:
-    name: Run Tox
-    uses: as/python.workflow/.github/workflows/tox.yml@v2
-    needs: install
-    with:
-      pythonVersion: 3.11
-      imageName: "asde-pyspark-glue/vg-pyspark-glue5:latest"
+            return meta["ds"]
 
-  package:
-    name: Package Glue Job Artifact
-    needs: [install, test]
-    uses: as/glue.workflow/.github/workflows/package-glue-app.yml@v2
-    with:
-      custom-glue-libs-name: "custom"
-      python-pip-artifact-name: ${{ needs.install.outputs.artifactName }}
+        except Exception as e:
+            log("error", "metadata", f"S3 metadata load failed: {e}")
+            raise
 
-  zip:
-    name: Create Glue Job ZIP
-    needs: package
-    runs-on: self-hosted
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
+    # Case 2: Local file (Glue ZIP)
+    else:
+        try:
+            log("info", "metadata", f"Loading local metadata file → {path}")
 
-      - name: Create Glue Job ZIP (include EVERYTHING under src/app)
-        run: |
-          echo "Zipping entire src/app folder..."
-          cd src/app
-          zip -r ../../glue_job_package.zip .
-          cd ../..
-          echo "ZIP Contents:"
-          unzip -l glue_job_package.zip
+            with open(path, "r") as f:
+                meta = json.load(f)
 
-      - name: Upload ZIP for next stage
-        uses: actions/upload-artifact@v4
-        with:
-          name: glue-zip
-          path: glue_job_package.zip
+            return meta["ds"]
 
-  prepare:
-    name: Prepare Glue Job Artifact for S3 Upload
-    needs: zip
-    uses: as/s3-upload.workflow/.github/workflows/ci.yml@v1
-    with:
-      artifactName: "glue_job_package.zip"
-      artifactDestination: "./src/app/"
-      filesToUpload: |
-        ./src/app/
-        ./src/app/custom/
-        ./src/app/custom/config/
-
-  create-release:
-    if: github.ref_name == 'main'
-    name: Create GitHub Release
-    needs: prepare
-    uses: as/release-generator.workflow/.github/workflows/release.yml@v1
+        except Exception as e:
+            log("error", "metadata", f"Local metadata load failed: {e}")
+            raise
