@@ -1,86 +1,89 @@
-from utilities.logger import log
-from layers.iceberg_manager import merge_into_iceberg, create_iceberg_table
 import pyspark.sql.functions as F
 
+from app.custom.utilities.logger import log
+from app.custom.layers.iceberg_manager import (
+    create_iceberg_table,
+    overwrite_iceberg_table,
+    merge_into_iceberg,
+)
 
-def write_curated(df, curated_path, full_load, iceberg_conf, spark):
+
+def write_curated(
+    spark,
+    df_curated,
+    curated_path: str,
+    full_load: bool,
+    iceberg_conf: dict,
+    domicile_value: str,
+    id_cols,
+):
     """
-    Handles writing to curated layer.
+    Write curated data.
 
-    LOGIC:
-      - If Iceberg enabled:
-            FULL_LOAD = True  → OVERWRITE entire Iceberg table
-            FULL_LOAD = False → MERGE INTO using id_cols
-      - If Iceberg disabled:
-            FULL_LOAD = True  → Parquet overwrite
-            FULL_LOAD = False → Parquet append
+    - If iceberg_conf["enabled"] == True:
+        * create table if not exists
+        * full load: truncate + insert
+        * incremental: MERGE into
+    - Else:
+        * Write Parquet to curated_path
+        * full load: overwrite, incremental: append
     """
+    iceberg_enabled = bool(iceberg_conf.get("enabled", False))
 
-    iceberg_enabled = iceberg_conf.get("enabled", False)
-
-    # -------------------------------------------------------
-    # Iceberg mode
-    # -------------------------------------------------------
     if iceberg_enabled:
         catalog = iceberg_conf["catalog"]
         database = iceberg_conf["database"]
         table = iceberg_conf["table"]
+        partition_cols = iceberg_conf.get("partition_cols", ["domicile"])
 
-        id_cols = iceberg_conf.get("id_cols", [])
-        partition_cols = iceberg_conf.get("partition_cols", [])
+        # Ensure domicile column is present before table creation
+        if "domicile" not in df_curated.columns:
+            df_curated = df_curated.withColumn("domicile", F.lit(domicile_value))
 
-        # Create Iceberg table if not exists
         create_iceberg_table(
             spark=spark,
             catalog=catalog,
             database=database,
             table=table,
-            df=df,
-            partition_cols=partition_cols
+            df=df_curated,
+            partition_cols=partition_cols,
         )
 
-        # FULL LOAD → drop & recreate behaviour
         if full_load:
-            spark.sql(f"DROP TABLE IF EXISTS {catalog}.{database}.{table}")
-            create_iceberg_table(
+            overwrite_iceberg_table(
                 spark=spark,
+                df=df_curated,
                 catalog=catalog,
                 database=database,
                 table=table,
-                df=df,
-                partition_cols=partition_cols
+                domicile_value=domicile_value,
             )
-            df.write.format("iceberg").mode("overwrite").saveAsTable(
-                f"{catalog}.{database}.{table}"
+        else:
+            merge_into_iceberg(
+                spark=spark,
+                df=df_curated,
+                catalog=catalog,
+                database=database,
+                table=table,
+                id_cols=id_cols,
+                domicile_value=domicile_value,
             )
-            log("info", "curated_iceberg_full_load",
-                f"Overwrote Iceberg table: {catalog}.{database}.{table}")
-            return
 
-        # INCREMENTAL LOAD → merge into Iceberg table
-        merge_into_iceberg(
-            spark=spark,
-            df=df,
-            catalog=catalog,
-            database=database,
-            table=table,
-            id_cols=id_cols,                 # MERGE ON id_cols only
-            partition_cols=partition_cols    # Not used for merge, informational
+    else:
+        # Fallback: just write Parquet
+        mode = "overwrite" if full_load else "append"
+
+        df_out = df_curated
+        if "domicile" not in df_out.columns:
+            df_out = df_out.withColumn("domicile", F.lit(domicile_value))
+
+        df_out.write.mode(mode).partitionBy("domicile").parquet(curated_path)
+
+        log(
+            "info",
+            "curated_parquet",
+            "Curated Parquet write completed",
+            path=curated_path,
+            mode=mode,
+            rows=df_out.count(),
         )
-
-        log("info", "curated_iceberg_merge",
-            f"Incremental MERGE completed → {catalog}.{database}.{table}")
-        return
-
-    # -------------------------------------------------------
-    # PARQUET MODE
-    # -------------------------------------------------------
-    mode = "overwrite" if full_load else "append"
-
-    df.write.mode(mode).parquet(curated_path)
-
-    log("info", "curated_parquet",
-        "Parquet write complete",
-        mode=mode,
-        path=curated_path)
-
