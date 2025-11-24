@@ -1,79 +1,124 @@
-from utilities.logger import log
+from typing import List
+
 import pyspark.sql.functions as F
 
+from app.custom.utilities.logger import log
 
-# -------------------------------------------------------------
-# 1. ICEBERG TABLE CREATION
-# -------------------------------------------------------------
-def create_iceberg_table(spark, catalog, database, table, df, partition_cols):
-    """
-    Creates Iceberg table automatically using DF schema + metadata partitions.
-    """
 
-    # Create namespace (DB)
+def _ensure_domicile_column(df, domicile_value: str):
+    """
+    Guarantee 'domicile' column exists and has a non-null value.
+    """
+    if "domicile" not in df.columns:
+        df = df.withColumn("domicile", F.lit(domicile_value))
+    else:
+        df = df.withColumn(
+            "domicile",
+            F.when(
+                (F.col("domicile").isNull())
+                | (F.col("domicile") == "")
+                | (F.lower(F.col("domicile")).isin("null", "none")),
+                domicile_value,
+            ).otherwise(F.col("domicile")),
+        )
+    return df
+
+
+def create_iceberg_table(spark, catalog: str, database: str, table: str, df, partition_cols: List[str]):
+    """
+    Create Iceberg table if it does not exist, using DF schema.
+    """
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog}.{database}")
 
-    # Generate schema based on DataFrame fields
-    columns_sql = ",\n".join(
-        [f"{field.name} {field.dataType.simpleString()}" 
-         for field in df.schema.fields]
-    )
+    cols_expr = []
+    for field in df.schema.fields:
+        cols_expr.append(f"{field.name} {field.dataType.simpleString()}")
 
-    partition_sql = (
-        f"PARTITIONED BY ({', '.join(partition_cols)})"
-        if partition_cols else ""
-    )
+    schema_sql = ",\n        ".join(cols_expr)
+
+    part = ""
+    if partition_cols:
+        part = f"PARTITIONED BY ({', '.join(partition_cols)})"
 
     create_sql = f"""
-        CREATE TABLE IF NOT EXISTS {catalog}.{database}.{table} (
-            {columns_sql}
-        )
-        USING iceberg
-        {partition_sql}
+    CREATE TABLE IF NOT EXISTS {catalog}.{database}.{table} (
+        {schema_sql}
+    )
+    USING iceberg
+    {part}
     """
 
+    log("info", "iceberg_create", f"Creating Iceberg table (if not exists): {catalog}.{database}.{table}")
     spark.sql(create_sql)
 
-    log("info", "iceberg_create",
-        f"Iceberg table created (or already exists): {catalog}.{database}.{table}",
-        partitions=partition_cols)
-    
 
-# -------------------------------------------------------------
-# 2. ICEBERG MERGE USING ONLY ID_COLS FROM METADATA
-# -------------------------------------------------------------
+def overwrite_iceberg_table(
+    spark,
+    df,
+    catalog: str,
+    database: str,
+    table: str,
+    domicile_value: str,
+):
+    """
+    Full load: TRUNCATE Iceberg table and INSERT all rows.
+    """
+    target = f"{catalog}.{database}.{table}"
+
+    df = _ensure_domicile_column(df, domicile_value)
+    df.createOrReplaceTempView("incoming_full")
+
+    log("info", "iceberg_overwrite", f"Truncating Iceberg table before full load: {target}")
+    spark.sql(f"TRUNCATE TABLE {target}")
+
+    insert_sql = f"INSERT INTO {target} SELECT * FROM incoming_full"
+    spark.sql(insert_sql)
+
+    log("info", "iceberg_overwrite", "Full load completed", table=target, rows=df.count())
+
+
 def merge_into_iceberg(
     spark,
     df,
-    catalog,
-    database,
-    table,
-    id_cols
+    catalog: str,
+    database: str,
+    table: str,
+    id_cols: List[str],
+    domicile_value: str,
 ):
     """
-    Incremental MERGE INTO Iceberg using only ID_COLS from metadata JSON.
+    Incremental load: MERGE INTO Iceberg using id_cols + domicile.
     """
-
-    # Load target table name
     target = f"{catalog}.{database}.{table}"
 
-    # Register incoming dataframe
-    df.createOrReplaceTempView("incoming_records")
+    df = _ensure_domicile_column(df, domicile_value)
+    df.createOrReplaceTempView("incoming_inc")
 
-    # Build MERGE condition: id1 AND id2 AND id3 ...
-    merge_condition = " AND ".join([f"t.{col} = s.{col}" for col in id_cols])
+    # Join keys = ID columns + domicile
+    merge_keys = list(id_cols or [])
+    if "domicile" not in merge_keys:
+        merge_keys.append("domicile")
 
-    # MERGE INTO Iceberg table
-    sql = f"""
-        MERGE INTO {target} t
-        USING incoming_records s
-        ON {merge_condition}
-        WHEN MATCHED THEN UPDATE SET *
-        WHEN NOT MATCHED THEN INSERT *
+    if not merge_keys:
+        raise ValueError("Iceberg merge requires at least one id column or domicile key")
+
+    merge_condition = " AND ".join([f"t.{c} = s.{c}" for c in merge_keys])
+
+    merge_sql = f"""
+    MERGE INTO {target} t
+    USING incoming_inc s
+    ON {merge_condition}
+    WHEN MATCHED THEN UPDATE SET *
+    WHEN NOT MATCHED THEN INSERT *
     """
 
-    spark.sql(sql)
+    log(
+        "info",
+        "iceberg_merge",
+        "Executing Iceberg MERGE",
+        table=target,
+        merge_keys=merge_keys,
+    )
+    spark.sql(merge_sql)
 
-    log("info", "iceberg_merge",
-        f"Iceberg MERGE completed for {target}",
-        merge_condition=merge_condition)
+    log("info", "iceberg_merge", "MERGE completed", table=target)
