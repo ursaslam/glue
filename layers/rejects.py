@@ -1,5 +1,6 @@
 import boto3
 from botocore.exceptions import ClientError
+from app.custom.utilities.logger import log_event
 
 
 # -------------------------------------------------------------------
@@ -34,30 +35,49 @@ def spark_to_glue_type(dt):
 
 
 # -------------------------------------------------------------------
-# Drop + Create Glue Table for Rejects
+# DROP + CREATE Glue Table for Rejects (with logging)
 # -------------------------------------------------------------------
 def create_rejects_glue_table(database: str, table_name: str, location: str, df):
     glue = boto3.client("glue")
+
+    log_event(
+        "rejects_table",
+        "Starting Glue table creation for rejects",
+        database=database,
+        table=table_name,
+        location=location
+    )
 
     # -------------------------
     # 1) Ensure database exists
     # -------------------------
     try:
         glue.create_database(DatabaseInput={"Name": database})
+        log_event("rejects_table", "Created Glue database", database=database)
     except glue.exceptions.AlreadyExistsException:
-        pass
+        log_event("rejects_table", "Glue database already exists", database=database)
 
     # -------------------------
-    # 2) Drop table if exists
+    # 2) Drop table if it already exists
     # -------------------------
     try:
         glue.delete_table(DatabaseName=database, Name=table_name)
-        print(f"Dropped existing rejects table: {database}.{table_name}")
+        log_event(
+            "rejects_table",
+            "Dropped existing Glue rejects table",
+            database=database,
+            table=table_name
+        )
     except glue.exceptions.EntityNotFoundException:
-        pass
+        log_event(
+            "rejects_table",
+            "Rejects table does not exist — nothing to drop",
+            database=database,
+            table=table_name
+        )
 
     # -------------------------
-    # 3) Build Glue columns from Spark schema
+    # 3) Build Glue schema from Spark schema
     # -------------------------
     glue_cols = [
         {"Name": f.name, "Type": spark_to_glue_type(f.dataType)}
@@ -67,24 +87,48 @@ def create_rejects_glue_table(database: str, table_name: str, location: str, df)
     # -------------------------
     # 4) Create Glue table
     # -------------------------
-    glue.create_table(
-        DatabaseName=database,
-        TableInput={
-            "Name": table_name,
-            "TableType": "EXTERNAL_TABLE",
-            "Parameters": {"classification": "parquet"},
-            "StorageDescriptor": {
-                "Columns": glue_cols,
-                "Location": location,
-                "InputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
-                "OutputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
-                "SerdeInfo": {
-                    "SerializationLibrary": "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
-                    "Parameters": {"serialization.format": "1"}
+    try:
+        glue.create_table(
+            DatabaseName=database,
+            TableInput={
+                "Name": table_name,
+                "TableType": "EXTERNAL_TABLE",
+                "Parameters": {"classification": "parquet"},
+                "StorageDescriptor": {
+                    "Columns": glue_cols,
+                    "Location": location,
+                    "InputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
+                    "OutputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
+                    "SerdeInfo": {
+                        "SerializationLibrary": "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+                        "Parameters": {"serialization.format": "1"}
+                    }
                 }
             }
-        }
-    )
+        )
 
-    print(f"Created rejects Glue table: {database}.{table_name}")
-    print(f"Location: {location}")
+        log_event(
+            "rejects_table",
+            "Created Glue rejects table successfully",
+            database=database,
+            table=table_name,
+            location=location
+        )
+
+    except Exception as e:
+        log_event(
+            "error",
+            "Failed to create Glue rejects table",
+            database=database,
+            table=table_name,
+            error=str(e)
+        )
+        raise
+
+    log_event(
+        "rejects_table",
+        "Glue rejects table creation completed",
+        database=database,
+        table=table_name,
+        location=location
+    )
